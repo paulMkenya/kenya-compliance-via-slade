@@ -10,16 +10,13 @@ required_apps = ["erpnext", "navariltd/csf_ke"]
 # Fixtures
 # --------
 fixtures = [
-    # {"dt": IMPORTED_ITEMS_STATUS_DOCTYPE_NAME},
-    # {"dt": ROUTES_TABLE_DOCTYPE_NAME},
-    # {"dt": ITEM_TYPE_DOCTYPE_NAME},
-    # {"dt": PRODUCT_TYPE_DOCTYPE_NAME},
-    # {
-    #     "dt": "Workspace Sidebar",
-    #     "filters": [
-    #         ["app", "=", "kenya_compliance_via_slade"]
-    #     ],
-    # },
+    {"dt": "eTims Routes"},
+    {"dt": "eTims Taxation Type"},
+    {"dt": "eTims Product Type"},
+    {"dt": "eTims Item Type"},
+    {"dt": "eTims Unit of Quantity"},
+    {"dt": "eTims Packaging Unit"},
+    {"dt": "eTims Country of Origin"},
 ]
 
 # Includes in <head>

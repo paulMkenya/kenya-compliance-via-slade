@@ -923,11 +923,9 @@ def authenticate_and_get_token(
     client_secret: str,
     docname: str = None,
 ) -> dict:
-    url = f"{auth_server_url}/oauth2/token/"
+    url = f"{auth_server_url}/realms/slade360/protocol/openid-connect/token"
     payload = {
-        "username": username,
-        "password": password,
-        "grant_type": "password",
+        "grant_type": "client_credentials",
         "client_id": client_id,
         "client_secret": client_secret,
     }
