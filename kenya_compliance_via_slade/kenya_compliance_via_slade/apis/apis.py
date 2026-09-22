@@ -98,6 +98,7 @@ def bulk_submit_sales_invoices(
         "docstatus": 1,
         "sent_to_etims": 0,
         "is_return": 0,
+        "etims_id": ["is", "not set"],
     }
 
     if docs_list:
@@ -1320,29 +1321,17 @@ def get_invoice_details(
 ) -> None:
     """Get invoice details"""
     invoice = frappe.get_doc(invoice_type, document_name)
-    # slade_id = id or invoice.etims_id
-    # if slade_id:
-    #     request_data = {
-    #         "document_name": document_name,
-    #         "id": slade_id,
-    #     }
-    #     frappe.enqueue(
-    #         process_request,
-    #         queue="default",
-    #         is_async=True,
-    #         request_data=request_data,
-    #         route_key="SaleSearchReq",
-    #         handler_function=update_invoice_info,
-    #         doctype=invoice_type,
-    #         document_name=document_name,
-    #         settings_name=settings_name,
-    #         company=company,
-    #     )
 
-    # else:
+    # An id (ours or the caller's) means the invoice already exists on Slade's
+    # side. _process_invoice_fetch_request only issues a safe GET-by-id
+    # (TrnsSalesSearchReq) when id is truthy - if id is left None here it
+    # silently falls through to a fresh create (TrnsSalesSaveWrReq) instead
+    # of fetching. Always resolve a known id before calling it, or every
+    # "just refresh the details" call becomes a duplicate invoice.
+    slade_id = id or invoice.etims_id
     reference_number = get_invoice_reference_number(invoice)
     _process_invoice_fetch_request(
-        id=None,
+        id=slade_id,
         document_name=document_name,
         invoice_type=invoice_type,
         settings_name=settings_name,

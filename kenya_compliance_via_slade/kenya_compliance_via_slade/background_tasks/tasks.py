@@ -665,7 +665,7 @@ def run_etims_ledger_scheduler():
     for s in settings_list:
         try:
             invoice_date_before = now_datetime().date()
-            invoice_date_after = invoice_date_before - timedelta(days=2)
+            invoice_date_after = invoice_date_before - timedelta(days=14)
             request_data = {
                 "invoice_date_after": invoice_date_after.isoformat(),
                 "invoice_date_before": invoice_date_before.isoformat(),
