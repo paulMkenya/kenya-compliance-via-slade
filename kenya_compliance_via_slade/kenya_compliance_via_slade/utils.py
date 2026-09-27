@@ -449,6 +449,7 @@ def build_invoice_payload(invoice: Document, settings_name: str) -> dict:
         "document_name": invoice.name,
         "reference_number": reference_number,
         "sales_type": "credit",
+        "customer": get_etims_id("Customer", invoice.customer, settings_name),
         "customer_pin": frappe.get_value("Customer", invoice.customer, "tax_id")
         or None,
         "partner_name": frappe.get_value("Customer", invoice.customer, "customer_name")
@@ -1008,6 +1009,15 @@ def authenticate_and_get_token(
 @frappe.whitelist()
 def update_navari_settings_with_token(docname: str, skip_checks: bool = False) -> str:
     settings_doc = frappe.get_doc(SETTINGS_DOCTYPE_NAME, docname)
+
+    cooldown_key = f"etims_auth_cooldown:{docname}"
+    if not skip_checks and frappe.cache().get_value(cooldown_key):
+        frappe.throw(
+            "Skipping Slade360 authentication: a recent attempt for this eTims Settings "
+            "failed and is in cooldown. Will retry automatically once the cooldown expires.",
+            frappe.AuthenticationError,
+        )
+
     needs_update = (
         skip_checks
         or not settings_doc.get("access_token")
@@ -1025,11 +1035,16 @@ def update_navari_settings_with_token(docname: str, skip_checks: bool = False) -
         password = settings_doc.get_password("auth_password")
         client_secret = settings_doc.get_password("client_secret")
 
-        token_details = authenticate_and_get_token(
-            auth_server_url, username, password, client_id, client_secret, docname
-        )
+        try:
+            token_details = authenticate_and_get_token(
+                auth_server_url, username, password, client_id, client_secret, docname
+            )
+        except Exception:
+            frappe.cache().set_value(cooldown_key, "1", expires_in_sec=300)
+            raise
 
         if not token_details:
+            frappe.cache().set_value(cooldown_key, "1", expires_in_sec=300)
             return None
 
         frappe.db.set_value(

@@ -8,8 +8,8 @@ from frappe.utils import add_months, flt, getdate
 from ...apis.api_builder import EndpointsBuilder
 from ...apis.process_request import process_request
 from ...apis.remote_response_status_handlers import (
+    process_invoice_creation_success,
     sales_information_submission_on_error,
-    sales_information_submission_on_success,
 )
 
 # from ...doctype.doctype_names_mapping import SETTINGS_DOCTYPE_NAME
@@ -130,8 +130,8 @@ def generic_invoices_on_submit_override(
             process_request,
             enqueue_after_commit=True,
             request_data=payload,
-            route_key="SalesInvoiceSaveReq",
-            handler_function=sales_information_submission_on_success,
+            route_key="TrnsSalesSaveWrReq",
+            handler_function=process_invoice_creation_success,
             request_method="POST",
             doctype=invoice_type,
             document_name=doc.name,

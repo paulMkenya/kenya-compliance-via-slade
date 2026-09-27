@@ -376,41 +376,76 @@ def sales_information_submission_on_error(
         # )
 
     elif "duplicate key value violates unique constraint" in error_message:
-        frappe.enqueue(
-            "kenya_compliance_via_slade.kenya_compliance_via_slade.apis.apis.get_invoice_details",
-            document_name=document_name,
-            invoice_type=doctype,
-            settings_name=settings_name,
-            queue="long",
-        )
+        if doc.etims_id:
+            # We already know Slade's id for this invoice - safe to refresh
+            # via a GET-by-id (get_invoice_details resolves this id itself).
+            frappe.enqueue(
+                "kenya_compliance_via_slade.kenya_compliance_via_slade.apis.apis.get_invoice_details",
+                document_name=document_name,
+                invoice_type=doctype,
+                settings_name=settings_name,
+                queue="long",
+            )
+        else:
+            # No known id, and this API has no real search-by-reference-number
+            # route - every lookup route (TrnsSalesSearchReq / SaleSearchReq)
+            # requires an id in the URL. Retrying here would silently create
+            # another duplicate draft on Slade's side instead of finding the
+            # existing one, so don't auto-retry. Surface it for manual
+            # reconciliation instead.
+            frappe.log_error(
+                title=f"eTims duplicate invoice, no known id: {document_name}",
+                message=(
+                    f"Slade reported a duplicate-key conflict for {doctype} {document_name} "
+                    "but no etims_id is recorded locally, so there is no safe way to look up "
+                    "the existing remote invoice via this API. Not auto-retrying to avoid "
+                    "creating further duplicates - needs manual reconciliation with Slade."
+                ),
+            )
 
 
-# def sales_information_submission_on_success(
-#     response: dict, document_name: str, doctype: str, **kwargs
-# ) -> None:
-#     """
-#     Callback function executed after successfully processing an item.
-#     Updates the invoice with custom ID and submission status.
-#     """
-#     frappe.db.set_value(
-#         doctype,
-#         document_name,
-#         {
-#             "etims_id": response.get("id"),
-#         },
-#     )
-#     frappe.enqueue(
-#         "kenya_compliance_via_slade.kenya_compliance_via_slade.apis.remote_response_status_handlers.process_invoice_items",
-#         document_name=document_name,
-#         doctype=doctype,
-#         invoice_slade_id=response.get("id"),
-#         queue="long",
-#     )
+def process_invoice_creation_success(
+    response: dict,
+    document_name: str,
+    doctype: str,
+    settings_name: str = None,
+    company: str = None,
+    **kwargs,
+) -> None:
+    """
+    Callback for the initial invoice-creation call (TrnsSalesSaveWrReq).
+    That endpoint only creates the draft invoice on Slade's side - it does not
+    sign it. Chains into the real create -> lines -> transition -> sign flow
+    (process_invoice_items -> process_sales_transition -> process_sales_sign)
+    instead of treating creation as done. Do not set sent_to_etims here; that
+    only happens once handle_invoice_sign_success actually signs the invoice.
+    """
+    frappe.db.set_value(
+        doctype,
+        document_name,
+        {
+            "etims_id": response.get("id"),
+        },
+    )
+    frappe.enqueue(
+        "kenya_compliance_via_slade.kenya_compliance_via_slade.apis.remote_response_status_handlers.process_invoice_items",
+        document_name=document_name,
+        doctype=doctype,
+        invoice_slade_id=response.get("id"),
+        settings_name=settings_name,
+        company=company,
+        queue="long",
+    )
 
 
 @frappe.whitelist()
 def process_invoice_items(
-    document_name: str, doctype: str, invoice_slade_id: str, **kwargs
+    document_name: str,
+    doctype: str,
+    invoice_slade_id: str,
+    settings_name: str = None,
+    company: str = None,
+    **kwargs,
 ) -> None:
     """
     Retrieves the specific invoice, extracts all items, and sends each
@@ -446,9 +481,11 @@ def process_invoice_items(
         base_amount = round(abs(item.get("base_amount")) or 0, 4)
 
         payload = {
-            "product": get_link_value(
-                "Item", "name", item.get("item_code"), "etims_id"
-            ),
+            # Item has no flat etims_id column - the Slade product id lives in
+            # the eTims ID Mapping child table, same as every other doctype's
+            # Slade id lookup (see get_etims_id). get_link_value("Item", "name",
+            # ..., "etims_id") queries a column that doesn't exist and throws.
+            "product": get_etims_id("Item", item.get("item_code"), settings_name),
             "quantity": round(qty, 4),
             "new_price": round(
                 base_net_rate + (converted_tax_amount / qty if qty else 0), 4
@@ -470,28 +507,65 @@ def process_invoice_items(
             sales_item_submission_on_success,
             doctype=items_table_doctype,
             request_method=request_method,
-            document_name=document_name,
+            # Must be this item row's own name, not the parent invoice's name -
+            # eTims Job Queue.reference_docname is a Dynamic Link keyed off
+            # reference_doctype (=items_table_doctype here), so pairing it with
+            # the parent invoice's name makes Frappe look for a non-existent
+            # "Sales Invoice Item" named after the Sales Invoice and fail link
+            # validation with "Could not find Reference Document Name".
+            document_name=item.get("name"),
+            settings_name=settings_name,
+            company=company,
         )
 
-    process_sales_transition(document_name, doctype, invoice_slade_id)
+    process_sales_transition(
+        document_name, doctype, invoice_slade_id, settings_name=settings_name, company=company
+    )
+
+
+def handle_transition_success(
+    response: dict,
+    document_name: str,
+    doctype: str,
+    settings_name: str = None,
+    company: str = None,
+    **kwargs,
+) -> None:
+    # Must be a module-level function, not a closure - eTims Job Queue stores
+    # handler_function as a "module.func_name" string and re-resolves it later
+    # via frappe.get_attr(), which can only see real module attributes. A
+    # closure nested inside process_sales_transition looked correct at
+    # enqueue time (__module__/__name__ report fine) but always failed to
+    # resolve when the job actually ran: AttributeError: module '...' has no
+    # attribute 'handle_transition_success'.
+    #
+    # Not writing custom_transition_successful here: it's not a real field on
+    # Sales Invoice (no custom field/fixture defines it anywhere in this app),
+    # so frappe.db.set_value throws "Unknown column 'custom_transition_successful'
+    # in 'SET'". Its only other reference in the codebase is inside a
+    # commented-out retry filter in background_tasks/tasks.py, so nothing
+    # currently reads it either - it was never actually wired up.
+    frappe.enqueue(
+        "kenya_compliance_via_slade.kenya_compliance_via_slade.apis.remote_response_status_handlers.process_sales_sign",
+        document_name=document_name,
+        doctype=doctype,
+        invoice_slade_id=response.get("id"),
+        settings_name=settings_name,
+        company=company,
+        queue="long",
+    )
 
 
 def process_sales_transition(
-    document_name: str, doctype: str, invoice_slade_id: str
+    document_name: str,
+    doctype: str,
+    invoice_slade_id: str,
+    settings_name: str = None,
+    company: str = None,
 ) -> None:
     from .process_request import process_request
 
     invoice = frappe.get_doc(doctype, document_name)
-
-    def handle_transition_success(response: dict, document_name: str, **kwargs) -> None:
-        frappe.db.set_value(doctype, document_name, {"custom_transition_successful": 1})
-        frappe.enqueue(
-            "kenya_compliance_via_slade.kenya_compliance_via_slade.apis.remote_response_status_handlers.process_sales_sign",
-            document_name=document_name,
-            doctype=doctype,
-            invoice_slade_id=response.get("id"),
-            queue="long",
-        )
 
     payload = {"invoice_id": invoice_slade_id, "document_name": document_name}
     route_key = "SalesTransitionReq"
@@ -505,12 +579,19 @@ def process_sales_transition(
         request_method="PATCH",
         doctype=doctype,
         document_name=document_name,
+        settings_name=settings_name,
+        company=company,
     )
 
 
 @frappe.whitelist()
 def process_sales_sign(
-    document_name: str, doctype: str, invoice_slade_id: str, queue: bool = True
+    document_name: str,
+    doctype: str,
+    invoice_slade_id: str,
+    settings_name: str = None,
+    company: str = None,
+    queue: bool = True,
 ) -> None:
     from .process_request import process_request
 
@@ -528,6 +609,8 @@ def process_sales_sign(
         request_method="POST",
         doctype=doctype,
         document_name=document_name,
+        settings_name=settings_name,
+        company=company,
         queue=queue,
     )
 
@@ -925,11 +1008,22 @@ def map_scu_fields(data: dict, docname: str, doctype: str, qr_key: str) -> dict:
 def sales_item_submission_on_success(
     response: dict, document_name: str, doctype: str, **kwargs
 ) -> None:
+    # Not every invoice-line child doctype carries these bookkeeping fields
+    # (e.g. "Sales Invoice Item" has none of them), so a blind db.set_value
+    # throws "Unknown column ... in \'SET\'" on every single line item -
+    # filter to whatever the doctype actually has, same defensive pattern
+    # already used for the Item doctype\'s own etims_id lookup above.
+    meta = frappe.get_meta(doctype)
     updates = {
-        "etims_id": response.get("id"),
-        "custom_sent_to_slade": 1,
+        field: value
+        for field, value in {
+            "etims_id": response.get("id"),
+            "custom_sent_to_slade": 1,
+        }.items()
+        if meta.has_field(field)
     }
-    frappe.db.set_value(doctype, document_name, updates)
+    if updates:
+        frappe.db.set_value(doctype, document_name, updates)
 
 
 def item_composition_submission_on_success(
