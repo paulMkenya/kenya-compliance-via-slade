@@ -7,7 +7,7 @@ from ...apis.process_request import process_request
 from ...apis.remote_response_status_handlers import (
     purchase_invoice_submission_on_success,
 )
-from ...utils import get_settings, get_taxation_types
+from ...utils import calculate_tax, get_settings, get_taxation_types
 
 endpoints_builder = EndpointsBuilder()
 
@@ -69,6 +69,7 @@ def submit_purchase_invoice(doc: Document) -> None:
             return
 
         if settings_doc:
+            apply_purchase_item_taxes(doc)
             payload = build_purchase_invoice_payload(doc, company_name)
             process_request(
                 payload,
@@ -104,3 +105,33 @@ def build_purchase_invoice_payload(doc: Document, company_name: str) -> dict:
     }
 
     return payload
+
+
+def apply_purchase_item_taxes(doc: Document) -> None:
+    """Purchase counterpart of utils.apply_item_taxes_and_codes (which only
+    writes Sales Invoice Item): the purchase payload reads etims_tax_amount /
+    etims_base_tax_amount / etims_tax_rate / taxation_type_code off each item,
+    so compute them with the same calculate_tax engine, set them on the rows
+    and persist them where the Purchase Invoice Item fields exist."""
+    tax_map = calculate_tax(doc)
+    persist = frappe.get_meta("Purchase Invoice Item").has_field("etims_tax_amount")
+    for item in doc.items:
+        data = tax_map.get(item.name) or {
+            "etims_tax_amount": 0.0, "etims_base_tax_amount": 0.0, "etims_tax_rate": 0.0, "taxation_type_code": None,
+        }
+        item.etims_tax_amount = data["etims_tax_amount"]
+        item.etims_base_tax_amount = data["etims_base_tax_amount"]
+        item.etims_tax_rate = data["etims_tax_rate"]
+        item.taxation_type_code = data["taxation_type_code"]
+        if persist:
+            frappe.db.set_value(
+                "Purchase Invoice Item",
+                item.name,
+                {
+                    "etims_tax_amount": data["etims_tax_amount"],
+                    "etims_base_tax_amount": data["etims_base_tax_amount"],
+                    "etims_tax_rate": data["etims_tax_rate"],
+                    "taxation_type_code": data["taxation_type_code"],
+                },
+                update_modified=False,
+            )
