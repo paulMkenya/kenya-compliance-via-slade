@@ -98,6 +98,9 @@ def bulk_submit_sales_invoices(
         "docstatus": 1,
         "sent_to_etims": 0,
         "is_return": 0,
+        # Opening invoices are balances brought forward, never KRA sales
+        # (on_submit and send_invoice_details already skip them).
+        "is_opening": ["!=", "Yes"],
         "etims_id": ["is", "not set"],
     }
 
