@@ -665,6 +665,15 @@ def calculate_tax(doc: Document) -> dict:
     return _calculate_taxes_by_hierarchy(doc)
 
 
+def _is_etims_excluded_tax(account_head: str | None) -> bool:
+    """
+    Non-VAT levies (e.g. the 2% Tourism/Catering Levy paid to the Tourism Fund)
+    are printed on invoices but are not a KRA tax, so they must not be folded
+    into the VAT-inclusive price sent to eTIMS.
+    """
+    return bool(account_head) and "levy" in account_head.lower()
+
+
 def _calculate_taxes_by_hierarchy(doc: "Document") -> dict:
     """
     Resolves tax rates for each item using a hierarchical priority:
@@ -687,7 +696,9 @@ def _calculate_taxes_by_hierarchy(doc: "Document") -> dict:
             rate = template_rate
         elif not has_item_templates and doc.get("taxes") and total_net > 0:
             total_doc_tax = sum(
-                float(t.base_tax_amount or t.tax_amount or 0) for t in doc.taxes
+                float(t.base_tax_amount or t.tax_amount or 0)
+                for t in doc.taxes
+                if not _is_etims_excluded_tax(t.account_head)
             )
             item_tax = total_doc_tax * (base_net / total_net)
             rate = (item_tax / base_net) * 100 if base_net else 0.0
@@ -705,8 +716,13 @@ def _calculate_from_item_wise_tax_table(doc: "Document", tax_table: list) -> dic
     """
     results = {}
     grouped = defaultdict(lambda: {"tax": 0.0, "taxable": 0.0})
+    excluded_tax_rows = {
+        t.name for t in doc.get("taxes", []) if _is_etims_excluded_tax(t.account_head)
+    }
 
     for row in tax_table:
+        if row.tax_row in excluded_tax_rows:
+            continue
         grouped[row.item_row]["tax"] += float(row.amount or 0.0)
         grouped[row.item_row]["taxable"] = float(row.taxable_amount or 0.0)
 
@@ -750,9 +766,15 @@ def _get_sales_taxes_template_rate(template_name: str) -> float:
     if not template_name:
         return 0.0
     rates = frappe.get_all(
-        "Sales Taxes and Charges", filters={"parent": template_name}, fields=["rate"]
+        "Sales Taxes and Charges",
+        filters={"parent": template_name},
+        fields=["rate", "account_head"],
     )
-    return sum(float(r.rate or 0.0) for r in rates)
+    return sum(
+        float(r.rate or 0.0)
+        for r in rates
+        if not _is_etims_excluded_tax(r.account_head)
+    )
 
 
 def _get_item_tax_template_rate(template_name: str) -> float:
